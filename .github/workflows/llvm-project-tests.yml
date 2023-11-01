@@ -52,6 +52,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Ninja
+        if: matrix.os != 'self-hosted' # ninja-build is already installed in self-hosted runners
         uses: llvm/actions/install-ninja@main
       # actions/checkout deletes any existing files in the new git directory,
       # so this needs to either run before ccache-action or it has to use
