@@ -693,6 +693,13 @@ def HasStdExtZvfbfwma : Predicate<"Subtarget->hasStdExtZvfbfwma()">,
                         AssemblerPredicate<(all_of FeatureStdExtZvfbfwma),
                             "'Zvfbfwma' (Vector BF16 widening mul-add)">;
 
+def FeatureStdExtZvfbfa
+    : RISCVExtension<0, 1, "Additional vector BF16 compute",
+                     [FeatureStdExtZve32f, FeatureStdExtZfbfmin]>;
+def HasStdExtZvfbfa : Predicate<"Subtarget->hasStdExtZvfbfa()">,
+                        AssemblerPredicate<(all_of FeatureStdExtZvfbfa),
+                            "'Zvfbfa' (Additional vector BF16 compute)">;
+
 def FeatureStdExtZvfhmin
     : RISCVExtension<1, 0,
                      "Vector Half-Precision Floating-Point Minimal",

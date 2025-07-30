@@ -1053,6 +1053,7 @@ R"(All available -march extensions for RISC-V
     zve64d               1.0
     zve64f               1.0
     zve64x               1.0
+    zvfbfa               0.1
     zvfbfmin             1.0
     zvfbfwma             1.0
     zvfh                 1.0

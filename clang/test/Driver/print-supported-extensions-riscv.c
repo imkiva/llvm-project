@@ -82,6 +82,7 @@
 // CHECK-NEXT:     zve64d               1.0       'Zve64d' (Vector Extensions for Embedded Processors with maximal 64 EEW, F and D extension)
 // CHECK-NEXT:     zve64f               1.0       'Zve64f' (Vector Extensions for Embedded Processors with maximal 64 EEW and F extension)
 // CHECK-NEXT:     zve64x               1.0       'Zve64x' (Vector Extensions for Embedded Processors with maximal 64 EEW)
+// CHECK-NEXT:     zvfbfa               0.1       'Zvfbfa' (Additional vector BF16 compute)
 // CHECK-NEXT:     zvfbfmin             1.0       'Zvfbfmin' (Vector BF16 Converts)
 // CHECK-NEXT:     zvfbfwma             1.0       'Zvfbfwma' (Vector BF16 widening mul-add)
 // CHECK-NEXT:     zvfh                 1.0       'Zvfh' (Vector Half-Precision Floating-Point)

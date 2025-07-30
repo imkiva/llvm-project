@@ -658,7 +658,7 @@ public:
   unsigned encodeVTYPE() const {
     assert(isValid() && !isUnknown() && !SEWLMULRatioOnly &&
            "Can't encode VTYPE for uninitialized or unknown");
-    return RISCVVType::encodeVTYPE(VLMul, SEW, TailAgnostic, MaskAgnostic);
+    return RISCVVType::encodeVTYPE(VLMul, SEW, /*TODO: AltFmt?*/ false, TailAgnostic, MaskAgnostic);
   }
 
   bool hasSEWLMULRatioOnly() const { return SEWLMULRatioOnly; }

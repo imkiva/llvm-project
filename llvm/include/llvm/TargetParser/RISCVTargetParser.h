@@ -97,8 +97,8 @@ inline static bool isValidLMUL(unsigned LMUL, bool Fractional) {
   return isPowerOf2_32(LMUL) && LMUL <= 8 && (!Fractional || LMUL != 1);
 }
 
-LLVM_ABI unsigned encodeVTYPE(VLMUL VLMUL, unsigned SEW, bool TailAgnostic,
-                              bool MaskAgnostic);
+LLVM_ABI unsigned encodeVTYPE(VLMUL VLMUL, unsigned SEW, bool AltFmt,
+                              bool TailAgnostic, bool MaskAgnostic);
 
 LLVM_ABI unsigned encodeXSfmmVType(unsigned SEW, unsigned Widen, bool AltFmt);
 

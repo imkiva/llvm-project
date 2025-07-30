@@ -121,7 +121,7 @@ class RISCVAsmParser : public MCTargetAsmParser {
 
   bool parseVTypeToken(const AsmToken &Tok, VTypeState &State, unsigned &Sew,
                        unsigned &Lmul, bool &Fractional, bool &TailAgnostic,
-                       bool &MaskAgnostic);
+                       bool &MaskAgnostic, bool &AltFmt);
   bool generateVTypeError(SMLoc ErrorLoc);
 
   bool generateXSfmmVTypeError(SMLoc ErrorLoc);
@@ -2249,12 +2249,14 @@ ParseStatus RISCVAsmParser::parseJALOffset(OperandVector &Operands) {
 bool RISCVAsmParser::parseVTypeToken(const AsmToken &Tok, VTypeState &State,
                                      unsigned &Sew, unsigned &Lmul,
                                      bool &Fractional, bool &TailAgnostic,
-                                     bool &MaskAgnostic) {
+                                     bool &MaskAgnostic, bool &AltFmt) {
   if (Tok.isNot(AsmToken::Identifier))
     return true;
 
   StringRef Identifier = Tok.getIdentifier();
   if (State < VTypeState::SeenSew && Identifier.consume_front("e")) {
+    if (Identifier.consume_back("alt"))
+      AltFmt = true;
     if (Identifier.getAsInteger(10, Sew))
       return true;
     if (!RISCVVType::isValidSEW(Sew))
@@ -2325,6 +2327,7 @@ ParseStatus RISCVAsmParser::parseVTypeI(OperandVector &Operands) {
   // Default values
   unsigned Sew = 8;
   unsigned Lmul = 1;
+  bool AltFmt = false;
   bool Fractional = false;
   bool TailAgnostic = false;
   bool MaskAgnostic = false;
@@ -2332,7 +2335,7 @@ ParseStatus RISCVAsmParser::parseVTypeI(OperandVector &Operands) {
   VTypeState State = VTypeState::SeenNothingYet;
   do {
     if (parseVTypeToken(getTok(), State, Sew, Lmul, Fractional, TailAgnostic,
-                        MaskAgnostic)) {
+                        MaskAgnostic, AltFmt)) {
       // The first time, errors return NoMatch rather than Failure
       if (State == VTypeState::SeenNothingYet)
         return ParseStatus::NoMatch;
@@ -2357,8 +2360,19 @@ ParseStatus RISCVAsmParser::parseVTypeI(OperandVector &Operands) {
                      " may not be compatible with all RVV implementations");
   }
 
+  // Attempting to set altfmt=1 and SEW >= 32 is reserved.
+  if (AltFmt) {
+    if (!STI->hasFeature(RISCV::FeatureStdExtZvfbfa)) {
+      Error(S, "vtype encoding with altfmt == 1 requires the 'Zvfbfa' extension");
+      return true;
+    }
+    if (Sew >= 32)
+      Warning(S, "use of vtype encodings with SEW >= 32 and "
+                 "altfmt == 1 is reserved");
+  }
+
   unsigned VTypeI =
-      RISCVVType::encodeVTYPE(VLMUL, Sew, TailAgnostic, MaskAgnostic);
+      RISCVVType::encodeVTYPE(VLMUL, Sew, AltFmt, TailAgnostic, MaskAgnostic);
   Operands.push_back(RISCVOperand::createVType(VTypeI, S));
   return ParseStatus::Success;
 }
