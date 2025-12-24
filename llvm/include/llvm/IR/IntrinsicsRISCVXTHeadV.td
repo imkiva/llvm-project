@@ -1264,6 +1264,17 @@ let TargetPrefix = "riscv" in {
     let VLOperand = 2;
   }
 
+  // 17.1 Integer Extract Instruction
+  // Output: (scalar)
+  // Input: (vector_in, index, vl)
+  def int_riscv_th_vext_x_v : DefaultAttrsIntrinsic<[llvm_anyint_ty],
+                                                   [LLVMMatchType<0>,
+                                                    LLVMVectorElementType<0>,
+                                                    llvm_anyint_ty],
+                                                   [IntrNoMem]>, RISCVVIntrinsic {
+    let VLOperand = 2;
+  }
+
   // 17.2. Integer Scalar Move Operations
   def int_riscv_th_vmv_x_s : DefaultAttrsIntrinsic<[LLVMVectorElementType<0>],
                                                    [llvm_anyint_ty],
