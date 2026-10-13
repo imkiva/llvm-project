@@ -10032,39 +10032,6 @@ isImpliedCondCommonOperandWithCR(CmpPredicate LPred, const ConstantRange &LCR,
   return std::nullopt;
 }
 
-/// Infer a range for an addend from a comparison of the sum with a constant.
-static std::optional<bool> isImpliedCondAdd(CmpPredicate LPred, const Value *L0,
-                                            const Value *L1, CmpPredicate RPred,
-                                            const Value *R0, const Value *R1,
-                                            const DataLayout &DL) {
-  // Normalize both comparisons to put the constants on the right.
-  if (match(L0, m_ImmConstant())) {
-    std::swap(L0, L1);
-    LPred = ICmpInst::getSwappedCmpPredicate(LPred);
-  }
-  if (match(R0, m_ImmConstant())) {
-    std::swap(R0, R1);
-    RPred = ICmpInst::getSwappedCmpPredicate(RPred);
-  }
-
-  const APInt *LC, *RC;
-  const Value *Offset;
-  if (!match(L1, m_APInt(LC)) || !match(R1, m_APInt(RC)) ||
-      !match(L0, m_c_Add(m_Specific(R0), m_Value(Offset))))
-    return std::nullopt;
-
-  // If `X + Offset` is in `LPred`, then X is in `LPred - Offset`.
-  ConstantRange CR = ConstantRange::makeExactICmpRegion(LPred, *LC)
-                         .sub(computeConstantRange(
-                             Offset, ICmpInst::isSigned(LPred),
-                             SimplifyQuery(DL), MaxAnalysisRecursionDepth - 1));
-  if (CR.icmp(RPred, ConstantRange(*RC)))
-    return true;
-  if (CR.icmp(ICmpInst::getInversePredicate(RPred), ConstantRange(*RC)))
-    return false;
-  return std::nullopt;
-}
-
 /// Return true if LHS implies RHS (expanded to its components as "R0 RPred R1")
 /// is true.  Return false if LHS implies RHS is false. Otherwise, return
 /// std::nullopt if we can't infer anything.
@@ -10170,9 +10137,6 @@ isImpliedCondICmps(CmpPredicate LPred, const Value *L0, const Value *L1,
       match(L0, m_c_Add(m_Specific(L1), m_Specific(R1))))
     return CmpPredicate::getMatching(LPred, RPred).has_value();
 
-  if (auto Implication = isImpliedCondAdd(LPred, L0, L1, RPred, R0, R1, DL))
-    return Implication;
-
   if (auto P = CmpPredicate::getMatching(LPred, RPred))
     return isImpliedCondOperands(*P, L0, L1, R0, R1);
 
@@ -10256,6 +10220,175 @@ isImpliedCondFCmps(FCmpInst::Predicate LPred, const Value *L0, const Value *L1,
   return std::nullopt;
 }
 
+/// Integer ranges implied by the comparisons that must hold in a condition.
+class ImpliedConditionRanges {
+  struct Fact {
+    CmpPredicate Pred;
+    const Value *LHS;
+    const Value *RHS;
+  };
+
+  const SimplifyQuery SQ;
+  SmallVector<Fact, 4> Facts;
+  SmallPtrSet<const Value *, 8> Active;
+  unsigned Budget = 8 * MaxAnalysisRecursionDepth;
+
+  void collect(const Value *Cond, bool IsTrue, unsigned Depth) {
+    if (Depth == MaxAnalysisRecursionDepth ||
+        Facts.size() == MaxAnalysisRecursionDepth)
+      return;
+    const Value *A, *B;
+    if (match(Cond, m_Not(m_Value(A)))) {
+      collect(A, !IsTrue, Depth + 1);
+      return;
+    }
+    if ((IsTrue && match(Cond, m_LogicalAnd(m_Value(A), m_Value(B)))) ||
+        (!IsTrue && match(Cond, m_LogicalOr(m_Value(A), m_Value(B))))) {
+      collect(A, IsTrue, Depth + 1);
+      collect(B, IsTrue, Depth + 1);
+      return;
+    }
+    CmpPredicate Pred;
+    if (!match(Cond, m_ICmpLike(Pred, m_Value(A), m_Value(B))) ||
+        !A->getType()->isIntOrIntVectorTy())
+      return;
+    if (!IsTrue)
+      Pred = ICmpInst::getInverseCmpPredicate(Pred);
+    if (match(A, m_ImmConstant())) {
+      std::swap(A, B);
+      Pred = ICmpInst::getSwappedCmpPredicate(Pred);
+    }
+    Facts.push_back({Pred, A, B});
+  }
+
+  ConstantRange unconditional(const Value *V, bool ForSigned) const {
+    return computeConstantRange(V, ForSigned, SQ,
+                                MaxAnalysisRecursionDepth - 1);
+  }
+
+  static ConstantRange inverseRange(unsigned Opcode, unsigned Op,
+                                    const ConstantRange &Result,
+                                    const ConstantRange &Other) {
+    if (Opcode == Instruction::Add)
+      return Result.sub(Other);
+    assert(Opcode == Instruction::Sub && "Expected add or sub");
+    return Op == 0 ? Result.add(Other) : Other.sub(Result);
+  }
+
+  /// Propagate a result range backwards through modular addition/subtraction.
+  ConstantRange infer(const Value *V, const Value *Expr, ConstantRange CR,
+                      bool ForSigned, unsigned Depth) {
+    if (V == Expr)
+      return CR;
+    ConstantRange Full =
+        ConstantRange::getFull(V->getType()->getScalarSizeInBits());
+    const auto *BO = dyn_cast<BinaryOperator>(Expr);
+    if (Depth == MaxAnalysisRecursionDepth || !Budget || !BO ||
+        (BO->getOpcode() != Instruction::Add &&
+         BO->getOpcode() != Instruction::Sub))
+      return Full;
+    --Budget;
+    const Value *A = BO->getOperand(0), *B = BO->getOperand(1);
+    auto MayContain = [&](const Value *Op) {
+      return Op == V || match(Op, m_CombineOr(m_Add(m_Value(), m_Value()),
+                                              m_Sub(m_Value(), m_Value())));
+    };
+    ConstantRange Result = Full;
+    if (MayContain(A)) {
+      ConstantRange ARange =
+          inverseRange(BO->getOpcode(), 0, CR, get(B, ForSigned, Depth + 1));
+      Result = infer(V, A, ARange, ForSigned, Depth + 1);
+    }
+    if (MayContain(B)) {
+      ConstantRange BRange =
+          inverseRange(BO->getOpcode(), 1, CR, get(A, ForSigned, Depth + 1));
+      Result = Result.intersectWith(infer(V, B, BRange, ForSigned, Depth + 1));
+    }
+    return Result;
+  }
+
+  ConstantRange get(const Value *V, bool ForSigned, unsigned Depth) {
+    ConstantRange CR = unconditional(V, ForSigned);
+    if (isa<Constant>(V) || Depth == MaxAnalysisRecursionDepth || !Budget ||
+        !Active.insert(V).second)
+      return CR;
+    --Budget;
+    auto Cleanup = scope_exit([&] { Active.erase(V); });
+
+    // Only propagate through elementwise integer operations. Conditional
+    // information about one vector lane must not constrain another lane.
+    if (const auto *BO = dyn_cast<BinaryOperator>(V)) {
+      ConstantRange A = get(BO->getOperand(0), ForSigned, Depth + 1);
+      ConstantRange B = get(BO->getOperand(1), ForSigned, Depth + 1);
+      CR = CR.intersectWith(A.binaryOp(BO->getOpcode(), B));
+    }
+
+    // Separate uses of an undef value may satisfy incompatible comparisons.
+    // Such facts cannot constrain its other uses, or be intersected together.
+    if (!isGuaranteedNotToBeUndef(V, nullptr, nullptr, nullptr, Depth))
+      return CR;
+    for (const Fact &F : Facts) {
+      if (F.LHS->getType() != V->getType())
+        continue;
+      ConstantRange Allowed = ConstantRange::makeAllowedICmpRegion(
+          F.Pred.dropSameSign(),
+          get(F.RHS, ICmpInst::isSigned(F.Pred), Depth + 1));
+      CR = CR.intersectWith(infer(V, F.LHS, Allowed, ForSigned, Depth + 1));
+    }
+    return CR;
+  }
+
+public:
+  ImpliedConditionRanges(const Value *Cond, bool IsTrue, const DataLayout &DL,
+                         unsigned Depth)
+      : SQ(DL) {
+    collect(Cond, IsTrue, Depth);
+  }
+
+  std::optional<bool> implies(CmpPredicate Pred, const Value *LHS,
+                              const Value *RHS) {
+    if (Facts.empty())
+      return std::nullopt;
+    if (match(LHS, m_ImmConstant())) {
+      std::swap(LHS, RHS);
+      Pred = ICmpInst::getSwappedCmpPredicate(Pred);
+    }
+    bool ForSigned = ICmpInst::isSigned(Pred);
+    ConstantRange RCR = get(RHS, ForSigned, 0);
+    auto Check = [&](const ConstantRange &LCR) -> std::optional<bool> {
+      if (LCR.icmp(Pred, RCR))
+        return true;
+      if (LCR.icmp(ICmpInst::getInversePredicate(Pred), RCR))
+        return false;
+      return std::nullopt;
+    };
+
+    // A single sum/difference comparison also constrains an operand use that
+    // may be undef. Preserve this proof without intersecting facts about it.
+    if (Facts.size() == 1 || isGuaranteedNotToBeUndef(LHS)) {
+      for (const Fact &F : Facts) {
+        if (F.LHS->getType() != LHS->getType())
+          continue;
+        const auto *BO = dyn_cast<BinaryOperator>(F.LHS);
+        if (!BO ||
+            (BO->getOpcode() != Instruction::Add &&
+             BO->getOpcode() != Instruction::Sub) ||
+            (BO->getOperand(0) != LHS && BO->getOperand(1) != LHS))
+          continue;
+        ConstantRange Allowed = ConstantRange::makeAllowedICmpRegion(
+            F.Pred.dropSameSign(), get(F.RHS, ICmpInst::isSigned(F.Pred), 0));
+        unsigned Op = BO->getOperand(0) == LHS ? 0 : 1;
+        ConstantRange Other = get(BO->getOperand(!Op), ForSigned, 0);
+        ConstantRange Inferred =
+            inverseRange(BO->getOpcode(), Op, Allowed, Other);
+        if (auto Result = Check(Inferred))
+          return Result;
+      }
+    }
+    return Check(get(LHS, ForSigned, 0));
+  }
+};
+
 /// Return true if LHS implies RHS is true.  Return false if LHS implies RHS is
 /// false.  Otherwise, return std::nullopt if we can't infer anything.  We
 /// expect the RHS to be an icmp and the LHS to be an 'and', 'or', or a 'select'
@@ -10315,8 +10448,9 @@ llvm::isImpliedCondition(const Value *LHS, CmpPredicate RHSPred,
     CmpPredicate LHSPred;
     Value *LHSOp0, *LHSOp1;
     if (match(LHS, m_ICmpLike(LHSPred, m_Value(LHSOp0), m_Value(LHSOp1))))
-      return isImpliedCondICmps(LHSPred, LHSOp0, LHSOp1, RHSPred, RHSOp0,
-                                RHSOp1, DL, LHSIsTrue);
+      if (auto Implied = isImpliedCondICmps(LHSPred, LHSOp0, LHSOp1, RHSPred,
+                                            RHSOp0, RHSOp1, DL, LHSIsTrue))
+        return Implied;
   } else {
     assert(RHSOp0->getType()->isFPOrFPVectorTy() &&
            "Expected floating point type only!");
@@ -10333,9 +10467,13 @@ llvm::isImpliedCondition(const Value *LHS, CmpPredicate RHSPred,
     if ((LHSI->getOpcode() == Instruction::And ||
          LHSI->getOpcode() == Instruction::Or ||
          LHSI->getOpcode() == Instruction::Select))
-      return isImpliedCondAndOr(LHSI, RHSPred, RHSOp0, RHSOp1, DL, LHSIsTrue,
-                                Depth);
+      if (auto Implied = isImpliedCondAndOr(LHSI, RHSPred, RHSOp0, RHSOp1, DL,
+                                            LHSIsTrue, Depth))
+        return Implied;
   }
+  if (RHSOp0->getType()->isIntOrIntVectorTy())
+    return ImpliedConditionRanges(LHS, LHSIsTrue, DL, Depth)
+        .implies(RHSPred, RHSOp0, RHSOp1);
   return std::nullopt;
 }
 

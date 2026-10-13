@@ -2708,6 +2708,57 @@ TEST_F(ValueTrackingTest, IsImpliedConditionOr2) {
   EXPECT_EQ(isImpliedCondition(A, A4, DL, false), std::nullopt);
 }
 
+TEST_F(ValueTrackingTest, IsImpliedConditionJointRanges) {
+  parseAssembly(R"(
+    define void @test(i8 noundef %size, i8 noundef %offset) {
+      %sum = add i8 %size, %offset
+      %sum_large = icmp ugt i8 %sum, 9
+      %offset_small = icmp ule i8 %offset, 5
+      %A = and i1 %sum_large, %offset_small
+      %A2 = icmp ugt i8 %size, 4
+      %A3 = icmp ule i8 %size, 4
+      ret void
+    }
+  )");
+  const DataLayout &DL = M->getDataLayout();
+  EXPECT_EQ(isImpliedCondition(A, A2, DL), true);
+  EXPECT_EQ(isImpliedCondition(A, A3, DL), false);
+  auto *Cmp = cast<ICmpInst>(A2);
+  EXPECT_EQ(isImpliedCondition(A, Cmp->getCmpPredicate(), Cmp->getOperand(0),
+                               Cmp->getOperand(1), DL),
+            true);
+}
+
+TEST_F(ValueTrackingTest, IsImpliedConditionRangesWithUndef) {
+  parseAssembly(R"(
+    define void @test(i8 %address, i8 %offset, i8 noundef %size) {
+      %x = and i8 %address, 3
+      %complement = sub i8 4, %x
+      %sum = add i8 %x, %complement
+      %A = icmp eq i8 %sum, 1
+      %A2 = icmp ugt i8 %x, 3
+      %end = add i8 %size, %offset
+      %end_large = icmp ugt i8 %end, 4
+      %offset_small = icmp ult i8 %offset, 4
+      %A3 = and i1 %end_large, %offset_small
+      %A4 = icmp ugt i8 %size, 1
+      %x_zero = icmp eq i8 %x, 0
+      %x_three = icmp eq i8 %x, 3
+      %A5 = and i1 %x_zero, %x_three
+      %other_sum = add i8 %size, %x
+      %A6 = icmp ugt i8 %other_sum, 4
+      ret void
+    }
+  )");
+  const DataLayout &DL = M->getDataLayout();
+  // The two occurrences of x in the sum need not have the same value.
+  EXPECT_EQ(isImpliedCondition(A, A2, DL), false);
+  // A bound on one use of offset does not constrain its use in the sum.
+  EXPECT_EQ(isImpliedCondition(A3, A4, DL), std::nullopt);
+  // Different uses of x may satisfy these otherwise incompatible facts.
+  EXPECT_EQ(isImpliedCondition(A5, A6, DL), std::nullopt);
+}
+
 TEST_F(ValueTrackingTest, IsImpliedConditionBitMask) {
   parseAssembly(R"(
     define void @test(i32 %x) {
